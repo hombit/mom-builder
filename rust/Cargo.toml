@@ -1,0 +1,21 @@
+[package]
+name = "mom_builder"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "mom_builder"
+crate-type = ["cdylib"]
+
+[dependencies]
+itertools = "0.12"
+numpy = "0.20"
+pyo3 = { version = "0.20", features= ["extension-module"] }
+serde = { version = "1", features = ["derive", "rc"] }
+# We may use any serialization format, but pickle makes it easy to introspect with Python
+serde-pickle = "1"
+thiserror = "1.0.50"
+
+[dev-dependencies]
+approx = "0.5.1"
