@@ -1,5 +1,5 @@
+use crate::state::merge_is_valid::MergeIsValid;
 use crate::state::merge_states::MergeStates;
-use crate::state::state_is_valid::StateIsValid;
 use numpy::ndarray::NdFloat;
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +68,7 @@ impl<V> Merger<V> {
 impl<T, V> MergeStates for Merger<V>
 where
     T: NdFloat,
-    V: StateIsValid<State = MinMaxMeanState<T>>,
+    V: MergeIsValid<State = MinMaxMeanState<T>>,
 {
     type State = MinMaxMeanState<T>;
 
@@ -95,7 +95,7 @@ where
             mean: sum / T::from(states.len()).expect("N cannot be casted to float"),
         };
 
-        if self.validator.state_is_valid(&merged_state) {
+        if self.validator.merge_is_valid(states, &merged_state) {
             Some(merged_state)
         } else {
             None
@@ -129,22 +129,22 @@ where
     }
 }
 
-impl<T> StateIsValid for RelativeToleranceValidator<T>
+impl<T> MergeIsValid for RelativeToleranceValidator<T>
 where
     T: NdFloat,
 {
     type State = MinMaxMeanState<T>;
 
-    /// Checks if the relative difference between minimum and maximum is less than the threshold.
+    /// Relative difference between min. and max. of the merged state is less than the threshold.
     ///
     /// Basically it checks if `abs(max - min) / norm <= threshold`, where `norm` is the maximum of
     /// the absolute values of `min` and `max`. If both are zero, the method returns `true`.
-    fn state_is_valid(&self, state: &Self::State) -> bool {
-        let denominator = T::max(T::abs(state.min), T::abs(state.max));
+    fn merge_is_valid(&self, _original_states: &[Self::State], merged_state: &Self::State) -> bool {
+        let denominator = T::max(T::abs(merged_state.min), T::abs(merged_state.max));
         if denominator.is_zero() {
             return true;
         }
-        let ratio = (state.max - state.min) / denominator;
+        let ratio = (merged_state.max - merged_state.min) / denominator;
         ratio <= self.threshold
     }
 }

@@ -12,7 +12,7 @@
 //! [MinMaxMeanStateValidator] checks if the relative difference between minimum and maximum is less
 //! than a given threshold.
 
+pub mod merge_is_valid;
 pub mod merge_states;
 pub mod min_max_mean;
-pub mod state_is_valid;
 pub mod value;
