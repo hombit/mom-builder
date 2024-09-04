@@ -5,196 +5,21 @@ use crate::state::value::ValueState;
 use crate::state::{min_max_mean, value};
 use crate::tree::Tree;
 use crate::tree_config::TreeConfig;
-use itertools::Itertools;
-use numpy::ndarray::{Array1 as NdArray, ArrayView1 as NdArrayView, NdFloat};
-use numpy::{dtype, PyArray1, PyUntypedArray};
-use numpy::{IntoPyArray, PyArrayDescr};
+use numpy::ndarray::ArrayView1 as NdArrayView;
+use numpy::PyArrayDescr;
+use numpy::{PyArray1, PyUntypedArray};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyIterator};
+use pyo3::types::PyBytes;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::fmt::Debug;
-use std::iter::once;
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 pyo3::import_exception!(pickle, PicklingError);
 pyo3::import_exception!(pickle, UnpicklingError);
-
-/// Builds multi-order healpix maps from an array of leaf values
-///
-/// Currently, support min-max-mean states only.
-///
-/// Parameters
-/// ----------
-/// a : numpy.ndarray of float32 or float64
-///     Input array of leaf values at the maximum healpix norder. It must
-/// max_norder : int
-///     Maximum depth of the healpix tree.
-/// threshold : float
-///     When merging leaf states to their parent nodes, the relative difference
-///     between minimum and maximum values is checked against this threshold.
-///     Must be non-negative.
-///
-/// Returns
-/// -------
-/// list of (np.ndarray of uint64, np.ndarray of float32 or float64)
-///     List of (indexes, values) pairs, a pair per norder.
-///
-#[pyfunction(name = "mom_from_array")]
-fn py_mom_from_array<'py>(
-    py: Python<'py>,
-    a: &'py PyUntypedArray,
-    max_norder: usize,
-    threshold: f64,
-) -> PyResult<Vec<(&'py PyArray1<usize>, &'py PyUntypedArray)>> {
-    if a.ndim() != 1 {
-        return Err(PyValueError::new_err("Input array must be 1-dimensional"));
-    }
-
-    let element_type = a.dtype();
-
-    if element_type.is_equiv_to(dtype::<f32>(py)) {
-        let a = a.downcast::<PyArray1<f32>>()?;
-        Ok(mom_from_array(py, a, max_norder, threshold as f32))
-    } else if element_type.is_equiv_to(dtype::<f64>(py)) {
-        let a = a.downcast::<PyArray1<f64>>()?;
-        Ok(mom_from_array(py, a, max_norder, threshold))
-    } else {
-        Err(pyo3::exceptions::PyTypeError::new_err(
-            "Input array's dtype must be f32 or f64",
-        ))
-    }
-}
-
-fn mom_from_array<'py, T>(
-    py: Python<'py>,
-    py_array: &'py PyArray1<T>,
-    max_norder: usize,
-    threshold: T,
-) -> Vec<(&'py PyArray1<usize>, &'py PyUntypedArray)>
-where
-    T: NdFloat + numpy::Element,
-    MinMaxMeanState<T>: Into<T>,
-{
-    let readonly = py_array.readonly();
-    let array = readonly.as_array();
-    let it = array.iter().map(|&x| -> Result<T, Infallible> { Ok(x) });
-
-    mom_from_it(py, it, max_norder, threshold).expect("Should not fail with infallible error")
-}
-
-/// Builds multi-order healpix maps from an iterator of leaf values.
-///
-/// It is a variant of `mom_from_array` which accepts an iterator
-/// of leaf value batches instead of an array. It is useful when
-/// the input array is too large to fit into memory.
-///
-/// Currently, support min-max-mean states only.
-///
-/// Parameters
-/// ----------
-/// it : iterator of numpy.ndarray of float32 or float64
-///     Iterator of batches of leaf values at the maximum healpix norder.
-///     The batch size is not limited, but it is recommended to use batches
-///     large enough to make the tree building efficient.
-/// max_norder : int
-///     Maximum depth of the healpix tree.
-/// threshold : float
-///     When merging leaf states to their parent nodes, the relative difference
-///     between minimum and maximum values is checked against this threshold.
-///     Must be non-negative.
-///
-/// Returns
-/// -------
-/// list of (np.ndarray of uint64, np.ndarray of float32 or float64)
-///     List of (indexes, values) pairs, a pair per norder.
-#[pyfunction(name = "mom_from_batch_it")]
-fn py_mom_from_batch_it<'py>(
-    py: Python<'py>,
-    it: &'py PyAny,
-    max_norder: usize,
-    threshold: f64,
-) -> PyResult<Vec<(&'py PyArray1<usize>, &'py PyUntypedArray)>> {
-    let mut py_iter = it.iter()?;
-    let first_element = py_iter
-        .next()
-        .ok_or_else(|| PyValueError::new_err("Input iterator is empty"))??;
-
-    if let Ok(array) = first_element.downcast::<PyArray1<f32>>() {
-        mom_from_first_and_it(py, array, py_iter, max_norder, threshold as f32)
-    } else if let Ok(array) = first_element.downcast::<PyArray1<f64>>() {
-        mom_from_first_and_it(py, array, py_iter, max_norder, threshold)
-    } else {
-        Err(pyo3::exceptions::PyTypeError::new_err(
-            "Iterator items must be 1-D numpy arrays having dtype f32 or f64",
-        ))
-    }
-}
-
-fn mom_from_first_and_it<'py, T>(
-    py: Python<'py>,
-    first: &'py PyArray1<T>,
-    py_iter: &'py PyIterator,
-    max_norder: usize,
-    threshold: T,
-) -> PyResult<Vec<(&'py PyArray1<usize>, &'py PyUntypedArray)>>
-where
-    T: NdFloat + numpy::Element,
-    MinMaxMeanState<T>: Into<T>,
-{
-    let it = once(first)
-        .map(Ok)
-        .chain(py_iter.map(|batch| Ok(batch?.downcast::<PyArray1<T>>()?)))
-        .map_ok(|py_array| {
-            let py_ro = py_array.readonly();
-            py_ro.to_owned_array()
-        })
-        .flatten_ok();
-
-    mom_from_it(py, it, max_norder, threshold)
-}
-
-fn mom_from_it<T, E>(
-    py: Python<'_>,
-    it: impl Iterator<Item = Result<T, E>>,
-    max_norder: usize,
-    threshold: T,
-) -> Result<Vec<(&PyArray1<usize>, &PyUntypedArray)>, E>
-where
-    T: NdFloat + numpy::Element,
-    MinMaxMeanState<T>: Into<T>,
-{
-    let it_states = it
-        .enumerate()
-        .map(|(index, x)| x.map(|value| (index, MinMaxMeanState::from(value))));
-
-    let state_validator = min_max_mean::RelativeToleranceValidator::new(threshold);
-    let state_merger = min_max_mean::Merger::new(state_validator);
-
-    let tree_config = TreeConfig::new(12usize, 4usize, max_norder);
-
-    let tree = build_tree(state_merger, tree_config, it_states)?;
-
-    let output = tree
-        .into_iter()
-        .map(|tiles| {
-            let (indexes, values) = tiles.into_tuple();
-            (
-                indexes.into_iter().collect::<NdArray<_>>().into_pyarray(py),
-                values
-                    .into_iter()
-                    .map(|x| x.into())
-                    .collect::<NdArray<_>>()
-                    .into_pyarray(py)
-                    .as_untyped(),
-            )
-        })
-        .collect::<Vec<_>>();
-    Ok(output)
-}
 
 /// A merger algorithm for MOMBuilder.
 ///
@@ -1095,8 +920,6 @@ where
 
 #[pymodule]
 fn mom_builder(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(py_mom_from_array, m)?)?;
-    m.add_function(wrap_pyfunction!(py_mom_from_batch_it, m)?)?;
     m.add_class::<MomMerger>()?;
     m.add_class::<MomBuilder>()?;
     Ok(())
