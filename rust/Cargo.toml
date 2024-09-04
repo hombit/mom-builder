@@ -9,7 +9,7 @@ name = "mom_builder"
 crate-type = ["cdylib"]
 
 [dependencies]
-itertools = "0.12"
+itertools = "0.13"
 num-traits = "0.2.19"
 numpy = "0.20"
 pyo3 = { version = "0.20", features = ["extension-module"] }
