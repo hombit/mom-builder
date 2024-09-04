@@ -2,19 +2,21 @@ use crate::state::merge_is_valid::MergeIsValid;
 use crate::state::merge_states::MergeStates;
 use crate::state::value::ValueState;
 use num_traits::Zero;
+use serde::{Deserialize, Serialize};
 
 /// Sum values until merge state is valid.
-struct SumUntil<V> {
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct SumUntilMerger<V> {
     pub validator: V,
 }
 
-impl<V> SumUntil<V> {
-    fn new(validator: V) -> Self {
+impl<V> SumUntilMerger<V> {
+    pub fn new(validator: V) -> Self {
         Self { validator }
     }
 }
 
-impl<V> Default for SumUntil<V>
+impl<V> Default for SumUntilMerger<V>
 where
     V: Default,
 {
@@ -23,7 +25,7 @@ where
     }
 }
 
-impl<T, V> MergeStates for SumUntil<V>
+impl<T, V> MergeStates for SumUntilMerger<V>
 where
     T: Copy + std::iter::Sum,
     V: MergeIsValid<State = ValueState<T>>,
@@ -45,7 +47,8 @@ where
 }
 
 /// Validator for maximum value, which checks if the merge state is less than or equal to the maximum value.
-struct MaximumValueValidator<T>(pub T);
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct MaximumValueValidator<T>(pub T);
 
 impl<T> MergeIsValid for MaximumValueValidator<T>
 where
@@ -65,7 +68,8 @@ where
 /// and 2) number of empty siblings is less than or equal to the maximum number of empty siblings.
 /// Also, you can optionally allow merge if all children states are zero. We refer to the children
 /// states with zero value as "empty siblings".
-struct MaximumValueEmptySiblingValidator<T> {
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct MaximumValueEmptySiblingValidator<T> {
     /// Maximum value of the merged state.
     pub threshold: T,
     /// Maximum number of empty siblings to allow merge.
