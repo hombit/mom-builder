@@ -6,11 +6,10 @@ use crate::state::{min_max_mean, value};
 use crate::tree::Tree;
 use crate::tree_config::TreeConfig;
 use numpy::ndarray::ArrayView1 as NdArrayView;
-use numpy::PyArrayDescr;
-use numpy::{PyArray1, PyUntypedArray};
+use numpy::{PyArray1, PyArrayDescr, PyArrayDescrMethods, PyArrayMethods, PyUntypedArray};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyFloat};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
@@ -20,6 +19,13 @@ use std::sync::{Arc, RwLock};
 
 pyo3::import_exception!(pickle, PicklingError);
 pyo3::import_exception!(pickle, UnpicklingError);
+
+type MomMergerKwargs = HashMap<String, f64>;
+type OutputTree<'py> = Vec<(
+    usize,
+    Bound<'py, PyArray1<usize>>,
+    Bound<'py, PyUntypedArray>,
+)>;
 
 /// A merger algorithm for MOMBuilder.
 ///
@@ -54,11 +60,11 @@ struct MomMerger {
 impl MomMerger {
     #[new]
     #[pyo3(signature = (state, merger, *, dtype, **kwargs))]
-    fn __new__(
-        state: &str,
-        merger: &str,
-        dtype: &PyArrayDescr,
-        kwargs: Option<HashMap<&str, f64>>,
+    fn __new__<'py>(
+        state: &'py str,
+        merger: &'py str,
+        dtype: Bound<'py, PyArrayDescr>,
+        kwargs: Option<MomMergerKwargs>,
     ) -> PyResult<Self> {
         let kwargs = kwargs.unwrap_or_default();
 
@@ -165,12 +171,12 @@ impl MomMerger {
 
     // pickle support
 
-    fn __getnewargs_ex__(
+    fn __getnewargs_ex__<'py>(
         &self,
-        py: Python,
+        py: Python<'py>,
     ) -> PyResult<(
         (&'static str, &'static str),
-        HashMap<&'static str, PyObject>,
+        HashMap<&'static str, Bound<'py, PyAny>>,
     )> {
         let state_str = match &self.tree_states {
             PyStates::MinMaxMean(_) => "min-max-mean",
@@ -184,13 +190,13 @@ impl MomMerger {
             let mut kwargs = match &self.tree_states {
                 PyStates::MinMaxMean(PyMinMaxMeanStates::F32(generic)) => [(
                     "threshold",
-                    generic.merger.validator.threshold().into_py(py),
+                    PyFloat::new_bound(py, generic.merger.validator.threshold() as f64).into_any(),
                 )]
                 .into_iter()
                 .collect(),
                 PyStates::MinMaxMean(PyMinMaxMeanStates::F64(generic)) => [(
                     "threshold",
-                    generic.merger.validator.threshold().into_py(py),
+                    PyFloat::new_bound(py, generic.merger.validator.threshold()).into_any(),
                 )]
                 .into_iter()
                 .collect(),
@@ -198,7 +204,7 @@ impl MomMerger {
             };
             kwargs.insert(
                 "dtype",
-                PyArrayDescr::new(py, &self.dtype_char)?.into_py(py),
+                PyArrayDescr::new_bound(py, &self.dtype_char)?.into_any(),
             );
             kwargs
         };
@@ -206,11 +212,11 @@ impl MomMerger {
         Ok(((state_str, merger_str), kwargs))
     }
 
-    fn __getstate__<'py>(&self, py: Python<'py>) -> &'py PyBytes {
-        PyBytes::new(py, &[])
+    fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, &[])
     }
 
-    fn __setstate__(&mut self, _state: &PyBytes) {
+    fn __setstate__(&mut self, _state: Bound<PyBytes>) {
         ()
     }
 
@@ -219,7 +225,7 @@ impl MomMerger {
         self.clone()
     }
 
-    fn __deepcopy__(&self, _memo: Py<PyAny>) -> Self {
+    fn __deepcopy__(&self, _memo: Bound<PyAny>) -> Self {
         self.clone()
     }
 }
@@ -462,7 +468,7 @@ impl MomBuilder {
         &self,
         py: Python<'py>,
         subtree_index: usize,
-    ) -> PyResult<&'py PyArray1<usize>> {
+    ) -> PyResult<Bound<'py, PyArray1<usize>>> {
         if subtree_index >= self.py_builder_config.top_tree_config.max_norder_nleaves() {
             return Err(PyValueError::new_err("subtree_index is out of range"));
         }
@@ -470,7 +476,7 @@ impl MomBuilder {
             .py_builder_config
             .max_norder_index_offset(subtree_index);
 
-        let output = PyArray1::from_vec(
+        let output = PyArray1::from_vec_bound(
             py,
             (offset..offset + self.py_builder_config.subtree_config.max_norder_nleaves()).collect(),
         );
@@ -503,8 +509,8 @@ impl MomBuilder {
         &self,
         py: Python<'py>,
         subtree_index: usize,
-        a: &'py PyAny,
-    ) -> PyResult<Vec<(usize, &'py PyArray1<usize>, &'py PyUntypedArray)>> {
+        a: Bound<'py, PyAny>,
+    ) -> PyResult<OutputTree<'py>> {
         match &self.states {
             PyStates::MinMaxMean(PyMinMaxMeanStates::F32(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
@@ -560,10 +566,7 @@ impl MomBuilder {
     /// list of (int, numpy.ndarray of uint64, numpy.ndarray of float32/64)
     ///     List of (norder, indexes, values) tuples, a tuple per non-empty
     ///     norder.
-    fn build_top_tree<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Vec<(usize, &'py PyArray1<usize>, &'py PyUntypedArray)>> {
+    fn build_top_tree<'py>(&self, py: Python<'py>) -> PyResult<OutputTree<'py>> {
         let top_tree_config = self.py_builder_config.top_tree_config.clone();
         match &self.states {
             PyStates::MinMaxMean(PyMinMaxMeanStates::F32(generic)) => {
@@ -711,13 +714,13 @@ impl MomBuilder {
         (args, kwargs.into_iter().collect())
     }
 
-    fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<&'py PyBytes> {
+    fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let vec_bytes = serde_pickle::to_vec(&self, serde_pickle::SerOptions::new())
             .map_err(|err| PicklingError::new_err(format!("Cannot pickle MOMBuilder: {}", err)))?;
-        Ok(PyBytes::new(py, &vec_bytes))
+        Ok(PyBytes::new_bound(py, &vec_bytes))
     }
 
-    fn __setstate__(&mut self, state: &PyBytes) -> PyResult<()> {
+    fn __setstate__<'py>(&mut self, state: Bound<'py, PyBytes>) -> PyResult<()> {
         *self = serde_pickle::from_slice(state.as_bytes(), serde_pickle::DeOptions::new())
             .map_err(|err| {
                 UnpicklingError::new_err(format!("Cannot unpickle MOMBuilder: {}", err))
@@ -731,7 +734,7 @@ impl MomBuilder {
         self.clone()
     }
 
-    fn __deepcopy__(&self, _memo: Py<PyAny>) -> Self {
+    fn __deepcopy__(&self, _memo: Bound<PyAny>) -> Self {
         self.clone()
     }
 }
@@ -746,9 +749,9 @@ where
         &self,
         py: Python<'py>,
         subtree_index: usize,
-        a: &'py PyArray1<T>,
+        a: &Bound<'py, PyArray1<T>>,
         config: &PyBuilderConfig,
-    ) -> PyResult<Vec<(usize, &'py PyArray1<usize>, &'py PyUntypedArray)>> {
+    ) -> PyResult<OutputTree<'py>> {
         py.allow_threads(|| {
             if self
                 .states
@@ -821,7 +824,7 @@ where
         &self,
         py: Python<'py>,
         top_tree_config: TreeConfig,
-    ) -> PyResult<Vec<(usize, &'py PyArray1<usize>, &'py PyUntypedArray)>> {
+    ) -> PyResult<OutputTree<'py>> {
         let tree = py.allow_threads(|| {
             {
                 let states = self
@@ -864,7 +867,7 @@ where
         py: Python<'py>,
         tree: Tree<State>,
         norder_offset: usize,
-    ) -> Vec<(usize, &'py PyArray1<usize>, &'py PyUntypedArray)> {
+    ) -> OutputTree<'py> {
         tree.into_iter()
             .enumerate()
             .filter(|(_norder, tiles)| tiles.len() != 0)
@@ -872,9 +875,10 @@ where
                 let (indexes, values) = tiles.into_tuple();
                 (
                     norder + norder_offset,
-                    PyArray1::from_vec(py, indexes),
-                    PyArray1::from_iter(py, values.into_iter().map(|state| state.into()))
-                        .as_untyped(),
+                    PyArray1::from_vec_bound(py, indexes),
+                    PyArray1::from_iter_bound(py, values.into_iter().map(|state| state.into()))
+                        .as_untyped()
+                        .to_owned(),
                 )
             })
             .collect()
@@ -919,7 +923,7 @@ where
 }
 
 #[pymodule]
-fn mom_builder(_py: Python, m: &PyModule) -> PyResult<()> {
+fn mom_builder(m: Bound<PyModule>) -> PyResult<()> {
     m.add_class::<MomMerger>()?;
     m.add_class::<MomBuilder>()?;
     Ok(())
