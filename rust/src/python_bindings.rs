@@ -151,9 +151,54 @@ impl MomMerger {
                                 threshold.extract()?,
                             )),
                         ))),
+                        'h' => PyStates::Value(PyValueStates::I16SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'i' => PyStates::Value(PyValueStates::I32SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'q' => PyStates::Value(PyValueStates::I64SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'B' => PyStates::Value(PyValueStates::U8SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'H' => PyStates::Value(PyValueStates::U16SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'I' => PyStates::Value(PyValueStates::U32SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'Q' => PyStates::Value(PyValueStates::U64SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'f' => PyStates::Value(PyValueStates::F32SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'd' => PyStates::Value(PyValueStates::F64SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
                         _ => {
                             return Err(PyValueError::new_err(
-                                r#"Only int8 dtype is supported for state="value" and merger="sum-threshold""#,
+                                r#"Only integer and floating point dtypes are supported for state="value" and merger="sum-threshold""#,
                             ))
                         }
                     }
@@ -396,6 +441,65 @@ enum PyValueStates {
     I8SumThreshold(
         GenericStates<i8, ValueState<i8>, value::SumUntilMerger<value::MaximumValueValidator<i8>>>,
     ),
+    I16SumThreshold(
+        GenericStates<
+            i16,
+            ValueState<i16>,
+            value::SumUntilMerger<value::MaximumValueValidator<i16>>,
+        >,
+    ),
+    I32SumThreshold(
+        GenericStates<
+            i32,
+            ValueState<i32>,
+            value::SumUntilMerger<value::MaximumValueValidator<i32>>,
+        >,
+    ),
+    I64SumThreshold(
+        GenericStates<
+            i64,
+            ValueState<i64>,
+            value::SumUntilMerger<value::MaximumValueValidator<i64>>,
+        >,
+    ),
+    U8SumThreshold(
+        GenericStates<u8, ValueState<u8>, value::SumUntilMerger<value::MaximumValueValidator<u8>>>,
+    ),
+    U16SumThreshold(
+        GenericStates<
+            u16,
+            ValueState<u16>,
+            value::SumUntilMerger<value::MaximumValueValidator<u16>>,
+        >,
+    ),
+    U32SumThreshold(
+        GenericStates<
+            u32,
+            ValueState<u32>,
+            value::SumUntilMerger<value::MaximumValueValidator<u32>>,
+        >,
+    ),
+    U64SumThreshold(
+        GenericStates<
+            u64,
+            ValueState<u64>,
+            value::SumUntilMerger<value::MaximumValueValidator<u64>>,
+        >,
+    ),
+    F32SumThreshold(
+        GenericStates<
+            f32,
+            ValueState<f32>,
+            value::SumUntilMerger<value::MaximumValueValidator<f32>>,
+        >,
+    ),
+    F64SumThreshold(
+        GenericStates<
+            f64,
+            ValueState<f64>,
+            value::SumUntilMerger<value::MaximumValueValidator<f64>>,
+        >,
+    ),
 }
 
 #[pymethods]
@@ -554,6 +658,33 @@ impl MomBuilder {
             PyStates::Value(PyValueStates::I8SumThreshold(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
+            PyStates::Value(PyValueStates::I16SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I32SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I64SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U8SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U16SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U32SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U64SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::F32SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::F64SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
         }
     }
 
@@ -609,6 +740,33 @@ impl MomBuilder {
                 generic.build_top_tree(py, top_tree_config)
             }
             PyStates::Value(PyValueStates::I8SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I16SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I32SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I64SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U8SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U16SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U32SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U64SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::F32SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::F64SumThreshold(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
         }
