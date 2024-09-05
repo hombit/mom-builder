@@ -20,7 +20,7 @@ use std::sync::{Arc, RwLock};
 pyo3::import_exception!(pickle, PicklingError);
 pyo3::import_exception!(pickle, UnpicklingError);
 
-type MomMergerKwargs = HashMap<String, f64>;
+type MomMergerKwargs<'py> = HashMap<String, Bound<'py, PyAny>>;
 type OutputTree<'py> = Vec<(
     usize,
     Bound<'py, PyArray1<usize>>,
@@ -64,7 +64,7 @@ impl MomMerger {
         state: &'py str,
         merger: &'py str,
         dtype: Bound<'py, PyArrayDescr>,
-        kwargs: Option<MomMergerKwargs>,
+        kwargs: Option<MomMergerKwargs<'py>>,
     ) -> PyResult<Self> {
         let kwargs = kwargs.unwrap_or_default();
 
@@ -78,14 +78,14 @@ impl MomMerger {
                             "state='min-max-mean' and merger='rtol' require exactly one additional keyword argument: threshold",
                         ));
                     }
-                    let threshold = *kwargs
+                    let threshold = kwargs
                             .get("threshold")
                             .ok_or_else(|| PyValueError::new_err(r#"threshold keyword argument is required for state="min-max-mean" and merger="rtol""#))?;
 
                     match dtype_char {
                         'f' => {
                             let state_validator =
-                                min_max_mean::RelativeToleranceValidator::new(threshold as f32);
+                                min_max_mean::RelativeToleranceValidator::new(threshold.extract()?);
                             let state_merger = min_max_mean::Merger::new(state_validator);
                             PyStates::MinMaxMean(PyMinMaxMeanStates::F32(GenericStates::new(
                                 state_merger,
@@ -93,7 +93,7 @@ impl MomMerger {
                         }
                         'd' => {
                             let state_validator =
-                                min_max_mean::RelativeToleranceValidator::new(threshold);
+                                min_max_mean::RelativeToleranceValidator::new(threshold.extract()?);
                             let state_merger = min_max_mean::Merger::new(state_validator);
                             PyStates::MinMaxMean(PyMinMaxMeanStates::F64(GenericStates::new(
                                 state_merger,
@@ -141,14 +141,14 @@ impl MomMerger {
                             "state='value' and merger='sum-threshold' require exactly one additional keyword argument: threshold",
                         ));
                     }
-                    let threshold = *kwargs
+                    let threshold = kwargs
                             .get("threshold")
                             .ok_or_else(|| PyValueError::new_err(r#"threshold keyword argument is required for state="value" and merger="sum-threshold""#))?;
 
                     match dtype_char {
                         'b' => PyStates::Value(PyValueStates::I8SumThreshold(GenericStates::new(
                             value::SumUntilMerger::new(value::MaximumValueValidator(
-                                threshold as i8,
+                                threshold.extract()?,
                             )),
                         ))),
                         _ => {
