@@ -74,7 +74,7 @@ pub struct MaximumValueEmptySiblingValidator<T> {
     pub threshold: T,
     /// Maximum number of empty siblings to allow merge.
     /// Setting it larger than the number of children would lead to the same behavior as
-    /// `MaximumValueValidator`.
+    /// [MaximumValueValidator].
     pub max_empty_siblings: usize,
     /// Allow merge if all children states are zero, even if max_empty_siblings is exceeded.
     pub allow_empty_merge: bool,
