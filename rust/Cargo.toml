@@ -9,10 +9,10 @@ name = "mom_builder"
 crate-type = ["cdylib"]
 
 [dependencies]
-itertools = "0.12"
+itertools = "0.13"
 num-traits = "0.2.19"
-numpy = "0.20"
-pyo3 = { version = "0.20", features = ["extension-module"] }
+numpy = "0.21"
+pyo3 = { version = "0.21", features = ["extension-module"] }
 serde = { version = "1", features = ["derive", "rc"] }
 # We may use any serialization format, but pickle makes it easy to introspect with Python
 serde-pickle = "1"

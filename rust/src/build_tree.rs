@@ -73,7 +73,7 @@ where
         // being grouped and the very first error is returned.
         let groups = max_norder_states
             .into_iter()
-            .group_by(|result| match result {
+            .chunk_by(|result| match result {
                 Ok((index, _state)) => ExclusiveOption::Some(*index / self.config.n_children()),
                 Err(_) => ExclusiveOption::None,
             });

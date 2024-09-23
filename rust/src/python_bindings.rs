@@ -5,198 +5,27 @@ use crate::state::value::ValueState;
 use crate::state::{min_max_mean, value};
 use crate::tree::Tree;
 use crate::tree_config::TreeConfig;
-use itertools::Itertools;
-use numpy::ndarray::{Array1 as NdArray, ArrayView1 as NdArrayView, NdFloat};
-use numpy::{dtype, PyArray1, PyUntypedArray};
-use numpy::{IntoPyArray, PyArrayDescr};
+use numpy::ndarray::ArrayView1 as NdArrayView;
+use numpy::{PyArray1, PyArrayDescr, PyArrayDescrMethods, PyArrayMethods, PyUntypedArray};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyIterator};
+use pyo3::types::{PyBytes, PyFloat};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::fmt::Debug;
-use std::iter::once;
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 pyo3::import_exception!(pickle, PicklingError);
 pyo3::import_exception!(pickle, UnpicklingError);
 
-/// Builds multi-order healpix maps from an array of leaf values
-///
-/// Currently, support min-max-mean states only.
-///
-/// Parameters
-/// ----------
-/// a : numpy.ndarray of float32 or float64
-///     Input array of leaf values at the maximum healpix norder. It must
-/// max_norder : int
-///     Maximum depth of the healpix tree.
-/// threshold : float
-///     When merging leaf states to their parent nodes, the relative difference
-///     between minimum and maximum values is checked against this threshold.
-///     Must be non-negative.
-///
-/// Returns
-/// -------
-/// list of (np.ndarray of uint64, np.ndarray of float32 or float64)
-///     List of (indexes, values) pairs, a pair per norder.
-///
-#[pyfunction(name = "mom_from_array")]
-fn py_mom_from_array<'py>(
-    py: Python<'py>,
-    a: &'py PyUntypedArray,
-    max_norder: usize,
-    threshold: f64,
-) -> PyResult<Vec<(&'py PyArray1<usize>, &'py PyUntypedArray)>> {
-    if a.ndim() != 1 {
-        return Err(PyValueError::new_err(
-            "Input array must be 1-dimensional",
-        ));
-    }
-
-    let element_type = a.dtype();
-
-    if element_type.is_equiv_to(dtype::<f32>(py)) {
-        let a = a.downcast::<PyArray1<f32>>()?;
-        Ok(mom_from_array(py, a, max_norder, threshold as f32))
-    } else if element_type.is_equiv_to(dtype::<f64>(py)) {
-        let a = a.downcast::<PyArray1<f64>>()?;
-        Ok(mom_from_array(py, a, max_norder, threshold))
-    } else {
-        Err(pyo3::exceptions::PyTypeError::new_err(
-            "Input array's dtype must be f32 or f64",
-        ))
-    }
-}
-
-fn mom_from_array<'py, T>(
-    py: Python<'py>,
-    py_array: &'py PyArray1<T>,
-    max_norder: usize,
-    threshold: T,
-) -> Vec<(&'py PyArray1<usize>, &'py PyUntypedArray)>
-where
-    T: NdFloat + numpy::Element,
-    MinMaxMeanState<T>: Into<T>,
-{
-    let readonly = py_array.readonly();
-    let array = readonly.as_array();
-    let it = array.iter().map(|&x| -> Result<T, Infallible> { Ok(x) });
-
-    mom_from_it(py, it, max_norder, threshold).expect("Should not fail with infallible error")
-}
-
-/// Builds multi-order healpix maps from an iterator of leaf values.
-///
-/// It is a variant of `mom_from_array` which accepts an iterator
-/// of leaf value batches instead of an array. It is useful when
-/// the input array is too large to fit into memory.
-///
-/// Currently, support min-max-mean states only.
-///
-/// Parameters
-/// ----------
-/// it : iterator of numpy.ndarray of float32 or float64
-///     Iterator of batches of leaf values at the maximum healpix norder.
-///     The batch size is not limited, but it is recommended to use batches
-///     large enough to make the tree building efficient.
-/// max_norder : int
-///     Maximum depth of the healpix tree.
-/// threshold : float
-///     When merging leaf states to their parent nodes, the relative difference
-///     between minimum and maximum values is checked against this threshold.
-///     Must be non-negative.
-///
-/// Returns
-/// -------
-/// list of (np.ndarray of uint64, np.ndarray of float32 or float64)
-///     List of (indexes, values) pairs, a pair per norder.
-#[pyfunction(name = "mom_from_batch_it")]
-fn py_mom_from_batch_it<'py>(
-    py: Python<'py>,
-    it: &'py PyAny,
-    max_norder: usize,
-    threshold: f64,
-) -> PyResult<Vec<(&'py PyArray1<usize>, &'py PyUntypedArray)>> {
-    let mut py_iter = it.iter()?;
-    let first_element = py_iter
-        .next()
-        .ok_or_else(|| PyValueError::new_err("Input iterator is empty"))??;
-
-    if let Ok(array) = first_element.downcast::<PyArray1<f32>>() {
-        mom_from_first_and_it(py, array, py_iter, max_norder, threshold as f32)
-    } else if let Ok(array) = first_element.downcast::<PyArray1<f64>>() {
-        mom_from_first_and_it(py, array, py_iter, max_norder, threshold)
-    } else {
-        Err(pyo3::exceptions::PyTypeError::new_err(
-            "Iterator items must be 1-D numpy arrays having dtype f32 or f64",
-        ))
-    }
-}
-
-fn mom_from_first_and_it<'py, T>(
-    py: Python<'py>,
-    first: &'py PyArray1<T>,
-    py_iter: &'py PyIterator,
-    max_norder: usize,
-    threshold: T,
-) -> PyResult<Vec<(&'py PyArray1<usize>, &'py PyUntypedArray)>>
-where
-    T: NdFloat + numpy::Element,
-    MinMaxMeanState<T>: Into<T>,
-{
-    let it = once(first)
-        .map(Ok)
-        .chain(py_iter.map(|batch| Ok(batch?.downcast::<PyArray1<T>>()?)))
-        .map_ok(|py_array| {
-            let py_ro = py_array.readonly();
-            py_ro.to_owned_array()
-        })
-        .flatten_ok();
-
-    mom_from_it(py, it, max_norder, threshold)
-}
-
-fn mom_from_it<T, E>(
-    py: Python<'_>,
-    it: impl Iterator<Item = Result<T, E>>,
-    max_norder: usize,
-    threshold: T,
-) -> Result<Vec<(&PyArray1<usize>, &PyUntypedArray)>, E>
-where
-    T: NdFloat + numpy::Element,
-    MinMaxMeanState<T>: Into<T>,
-{
-    let it_states = it
-        .enumerate()
-        .map(|(index, x)| x.map(|value| (index, MinMaxMeanState::from(value))));
-
-    let state_validator = min_max_mean::RelativeToleranceValidator::new(threshold);
-    let state_merger = min_max_mean::Merger::new(state_validator);
-
-    let tree_config = TreeConfig::new(12usize, 4usize, max_norder);
-
-    let tree = build_tree(state_merger, tree_config, it_states)?;
-
-    let output = tree
-        .into_iter()
-        .map(|tiles| {
-            let (indexes, values) = tiles.into_tuple();
-            (
-                indexes.into_iter().collect::<NdArray<_>>().into_pyarray(py),
-                values
-                    .into_iter()
-                    .map(|x| x.into())
-                    .collect::<NdArray<_>>()
-                    .into_pyarray(py)
-                    .as_untyped(),
-            )
-        })
-        .collect::<Vec<_>>();
-    Ok(output)
-}
+type MomMergerKwargs<'py> = HashMap<String, Bound<'py, PyAny>>;
+type OutputTree<'py> = Vec<(
+    usize,
+    Bound<'py, PyArray1<usize>>,
+    Bound<'py, PyUntypedArray>,
+)>;
 
 /// A merger algorithm for MOMBuilder.
 ///
@@ -231,11 +60,11 @@ struct MomMerger {
 impl MomMerger {
     #[new]
     #[pyo3(signature = (state, merger, *, dtype, **kwargs))]
-    fn __new__(
-        state: &str,
-        merger: &str,
-        dtype: &PyArrayDescr,
-        kwargs: Option<HashMap<&str, f64>>,
+    fn __new__<'py>(
+        state: &'py str,
+        merger: &'py str,
+        dtype: Bound<'py, PyArrayDescr>,
+        kwargs: Option<MomMergerKwargs<'py>>,
     ) -> PyResult<Self> {
         let kwargs = kwargs.unwrap_or_default();
 
@@ -249,14 +78,14 @@ impl MomMerger {
                             "state='min-max-mean' and merger='rtol' require exactly one additional keyword argument: threshold",
                         ));
                     }
-                    let threshold = *kwargs
+                    let threshold = kwargs
                             .get("threshold")
                             .ok_or_else(|| PyValueError::new_err(r#"threshold keyword argument is required for state="min-max-mean" and merger="rtol""#))?;
 
                     match dtype_char {
                         'f' => {
                             let state_validator =
-                                min_max_mean::RelativeToleranceValidator::new(threshold as f32);
+                                min_max_mean::RelativeToleranceValidator::new(threshold.extract()?);
                             let state_merger = min_max_mean::Merger::new(state_validator);
                             PyStates::MinMaxMean(PyMinMaxMeanStates::F32(GenericStates::new(
                                 state_merger,
@@ -264,7 +93,7 @@ impl MomMerger {
                         }
                         'd' => {
                             let state_validator =
-                                min_max_mean::RelativeToleranceValidator::new(threshold);
+                                min_max_mean::RelativeToleranceValidator::new(threshold.extract()?);
                             let state_merger = min_max_mean::Merger::new(state_validator);
                             PyStates::MinMaxMean(PyMinMaxMeanStates::F64(GenericStates::new(
                                 state_merger,
@@ -288,20 +117,198 @@ impl MomMerger {
                     }
 
                     match dtype_char {
-                        '?' => PyStates::Value(PyValueStates::Bool(GenericStates::default())),
-                        'b' => PyStates::Value(PyValueStates::I8(GenericStates::default())),
-                        'h' => PyStates::Value(PyValueStates::I16(GenericStates::default())),
-                        'i' => PyStates::Value(PyValueStates::I32(GenericStates::default())),
-                        'q' => PyStates::Value(PyValueStates::I64(GenericStates::default())),
-                        'B' => PyStates::Value(PyValueStates::U8(GenericStates::default())),
-                        'H' => PyStates::Value(PyValueStates::U16(GenericStates::default())),
-                        'I' => PyStates::Value(PyValueStates::U32(GenericStates::default())),
-                        'Q' => PyStates::Value(PyValueStates::U64(GenericStates::default())),
-                        'f' => PyStates::Value(PyValueStates::F32(GenericStates::default())),
-                        'd' => PyStates::Value(PyValueStates::F64(GenericStates::default())),
+                        '?' => PyStates::Value(PyValueStates::BoolEqual(GenericStates::default())),
+                        'b' => PyStates::Value(PyValueStates::I8Equal(GenericStates::default())),
+                        'h' => PyStates::Value(PyValueStates::I16Equal(GenericStates::default())),
+                        'i' => PyStates::Value(PyValueStates::I32Equal(GenericStates::default())),
+                        'q' => PyStates::Value(PyValueStates::I64Equal(GenericStates::default())),
+                        'B' => PyStates::Value(PyValueStates::U8Equal(GenericStates::default())),
+                        'H' => PyStates::Value(PyValueStates::U16Equal(GenericStates::default())),
+                        'I' => PyStates::Value(PyValueStates::U32Equal(GenericStates::default())),
+                        'Q' => PyStates::Value(PyValueStates::U64Equal(GenericStates::default())),
+                        'f' => PyStates::Value(PyValueStates::F32Equal(GenericStates::default())),
+                        'd' => PyStates::Value(PyValueStates::F64Equal(GenericStates::default())),
                         _ => {
                             return Err(PyValueError::new_err(
                                 r#"Only bool, integer and floating point dtypes are supported for state="value" and merger="equal""#,
+                            ))
+                        }
+                    }
+                }
+                "sum-threshold" => {
+                    if kwargs.keys().len() != 1 {
+                        return Err(PyValueError::new_err(
+                            "state='value' and merger='sum-threshold' require exactly one additional keyword argument: threshold",
+                        ));
+                    }
+                    let threshold = kwargs
+                            .get("threshold")
+                            .ok_or_else(|| PyValueError::new_err(r#"threshold keyword argument is required for state="value" and merger="sum-threshold""#))?;
+
+                    match dtype_char {
+                        'b' => PyStates::Value(PyValueStates::I8SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'h' => PyStates::Value(PyValueStates::I16SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'i' => PyStates::Value(PyValueStates::I32SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'q' => PyStates::Value(PyValueStates::I64SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'B' => PyStates::Value(PyValueStates::U8SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'H' => PyStates::Value(PyValueStates::U16SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'I' => PyStates::Value(PyValueStates::U32SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'Q' => PyStates::Value(PyValueStates::U64SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'f' => PyStates::Value(PyValueStates::F32SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        'd' => PyStates::Value(PyValueStates::F64SumThreshold(GenericStates::new(
+                            value::SumUntilMerger::new(value::MaximumValueValidator(
+                                threshold.extract()?,
+                            )),
+                        ))),
+                        _ => {
+                            return Err(PyValueError::new_err(
+                                r#"Only integer and floating point dtypes are supported for state="value" and merger="sum-threshold""#,
+                            ))
+                        }
+                    }
+                }
+                "sum-threshold-empty-siblings" => {
+                    if kwargs.keys().len() != 3 {
+                        return Err(PyValueError::new_err(
+                            "state='value' and merger='sum-threshold-empty-siblings' require exactly one additional keyword argument: threshold",
+                        ));
+                    }
+                    let threshold = kwargs
+                        .get("threshold")
+                        .ok_or_else(|| PyValueError::new_err(r#"threshold keyword argument is required for state="value" and merger="sum-threshold-empty-siblings""#))?;
+                    let max_empty_siblings = kwargs.get("max_empty_siblings").ok_or_else(|| PyValueError::new_err(r#"max_empty_siblings keyword argument is required for state="value" and merger="sum-threshold-empty-siblings""#))?.extract()?;
+                    let allow_empty_merge = kwargs.get("allow_empty_merge").ok_or_else(|| PyValueError::new_err(r#"allow_empty_merge keyword argument is required for state="value" and merger="sum-threshold-empty-siblings""#))?.extract()?;
+
+                    match dtype_char {
+                        'b' => PyStates::Value(PyValueStates::I8SumThresholdEmptySiblings(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueEmptySiblingValidator {
+                                    threshold: threshold.extract()?,
+                                    max_empty_siblings,
+                                    allow_empty_merge,
+                                },
+                            )),
+                        )),
+                        'h' => PyStates::Value(PyValueStates::I16SumThresholdEmptySiblings(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueEmptySiblingValidator {
+                                    threshold: threshold.extract()?,
+                                    max_empty_siblings,
+                                    allow_empty_merge,
+                                },
+                            )),
+                        )),
+                        'i' => PyStates::Value(PyValueStates::I32SumThresholdEmptySiblings(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueEmptySiblingValidator {
+                                    threshold: threshold.extract()?,
+                                    max_empty_siblings,
+                                    allow_empty_merge,
+                                },
+                            )),
+                        )),
+                        'q' => PyStates::Value(PyValueStates::I64SumThresholdEmptySiblings(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueEmptySiblingValidator {
+                                    threshold: threshold.extract()?,
+                                    max_empty_siblings,
+                                    allow_empty_merge,
+                                },
+                            )),
+                        )),
+                        'B' => PyStates::Value(PyValueStates::U8SumThresholdEmptySiblings(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueEmptySiblingValidator {
+                                    threshold: threshold.extract()?,
+                                    max_empty_siblings,
+                                    allow_empty_merge,
+                                },
+                            )),
+                        )),
+                        'H' => PyStates::Value(PyValueStates::U16SumThresholdEmptySiblings(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueEmptySiblingValidator {
+                                    threshold: threshold.extract()?,
+                                    max_empty_siblings,
+                                    allow_empty_merge,
+                                },
+                            )),
+                        )),
+                        'I' => PyStates::Value(PyValueStates::U32SumThresholdEmptySiblings(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueEmptySiblingValidator {
+                                    threshold: threshold.extract()?,
+                                    max_empty_siblings,
+                                    allow_empty_merge,
+                                },
+                            )),
+                        )),
+                        'Q' => PyStates::Value(PyValueStates::U64SumThresholdEmptySiblings(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueEmptySiblingValidator {
+                                    threshold: threshold.extract()?,
+                                    max_empty_siblings,
+                                    allow_empty_merge,
+                                },
+                            )),
+                        )),
+                        'f' => PyStates::Value(PyValueStates::F32SumThresholdEmptySiblings(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueEmptySiblingValidator {
+                                    threshold: threshold.extract()?,
+                                    max_empty_siblings,
+                                    allow_empty_merge,
+                                },
+                            )),
+                        )),
+                        'd' => PyStates::Value(PyValueStates::F64SumThresholdEmptySiblings(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueEmptySiblingValidator {
+                                    threshold: threshold.extract()?,
+                                    max_empty_siblings,
+                                    allow_empty_merge,
+                                },
+                            )),
+                        )),
+                        _ => {
+                            return Err(PyValueError::new_err(
+                                r#"Only integer and floating point dtypes are supported for state="value" and merger="sum-threshold-empty-siblings""#,
                             ))
                         }
                     }
@@ -319,12 +326,12 @@ impl MomMerger {
 
     // pickle support
 
-    fn __getnewargs_ex__(
+    fn __getnewargs_ex__<'py>(
         &self,
-        py: Python,
+        py: Python<'py>,
     ) -> PyResult<(
         (&'static str, &'static str),
-        HashMap<&'static str, PyObject>,
+        HashMap<&'static str, Bound<'py, PyAny>>,
     )> {
         let state_str = match &self.tree_states {
             PyStates::MinMaxMean(_) => "min-max-mean",
@@ -338,13 +345,13 @@ impl MomMerger {
             let mut kwargs = match &self.tree_states {
                 PyStates::MinMaxMean(PyMinMaxMeanStates::F32(generic)) => [(
                     "threshold",
-                    generic.merger.validator.threshold().into_py(py),
+                    PyFloat::new_bound(py, generic.merger.validator.threshold() as f64).into_any(),
                 )]
                 .into_iter()
                 .collect(),
                 PyStates::MinMaxMean(PyMinMaxMeanStates::F64(generic)) => [(
                     "threshold",
-                    generic.merger.validator.threshold().into_py(py),
+                    PyFloat::new_bound(py, generic.merger.validator.threshold()).into_any(),
                 )]
                 .into_iter()
                 .collect(),
@@ -352,7 +359,7 @@ impl MomMerger {
             };
             kwargs.insert(
                 "dtype",
-                PyArrayDescr::new(py, &self.dtype_char)?.into_py(py),
+                PyArrayDescr::new_bound(py, &self.dtype_char)?.into_any(),
             );
             kwargs
         };
@@ -360,11 +367,11 @@ impl MomMerger {
         Ok(((state_str, merger_str), kwargs))
     }
 
-    fn __getstate__<'py>(&self, py: Python<'py>) -> &'py PyBytes {
-        PyBytes::new(py, &[])
+    fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, &[])
     }
 
-    fn __setstate__(&mut self, _state: &PyBytes) {
+    fn __setstate__(&mut self, _state: Bound<PyBytes>) {
         ()
     }
 
@@ -373,7 +380,7 @@ impl MomMerger {
         self.clone()
     }
 
-    fn __deepcopy__(&self, _memo: Py<PyAny>) -> Self {
+    fn __deepcopy__(&self, _memo: Bound<PyAny>) -> Self {
         self.clone()
     }
 }
@@ -528,17 +535,152 @@ enum PyMinMaxMeanStates {
 
 #[derive(Clone, Serialize, Deserialize)]
 enum PyValueStates {
-    Bool(GenericStates<bool, ValueState<bool>, value::ExactlyEqualMerger<bool>>),
-    I8(GenericStates<i8, ValueState<i8>, value::ExactlyEqualMerger<i8>>),
-    I16(GenericStates<i16, ValueState<i16>, value::ExactlyEqualMerger<i16>>),
-    I32(GenericStates<i32, ValueState<i32>, value::ExactlyEqualMerger<i32>>),
-    I64(GenericStates<i64, ValueState<i64>, value::ExactlyEqualMerger<i64>>),
-    U8(GenericStates<u8, ValueState<u8>, value::ExactlyEqualMerger<u8>>),
-    U16(GenericStates<u16, ValueState<u16>, value::ExactlyEqualMerger<u16>>),
-    U32(GenericStates<u32, ValueState<u32>, value::ExactlyEqualMerger<u32>>),
-    U64(GenericStates<u64, ValueState<u64>, value::ExactlyEqualMerger<u64>>),
-    F32(GenericStates<f32, ValueState<f32>, value::ExactlyEqualMerger<f32>>),
-    F64(GenericStates<f64, ValueState<f64>, value::ExactlyEqualMerger<f64>>),
+    // Exact equality merger
+    BoolEqual(GenericStates<bool, ValueState<bool>, value::ExactlyEqualMerger<bool>>),
+    I8Equal(GenericStates<i8, ValueState<i8>, value::ExactlyEqualMerger<i8>>),
+    I16Equal(GenericStates<i16, ValueState<i16>, value::ExactlyEqualMerger<i16>>),
+    I32Equal(GenericStates<i32, ValueState<i32>, value::ExactlyEqualMerger<i32>>),
+    I64Equal(GenericStates<i64, ValueState<i64>, value::ExactlyEqualMerger<i64>>),
+    U8Equal(GenericStates<u8, ValueState<u8>, value::ExactlyEqualMerger<u8>>),
+    U16Equal(GenericStates<u16, ValueState<u16>, value::ExactlyEqualMerger<u16>>),
+    U32Equal(GenericStates<u32, ValueState<u32>, value::ExactlyEqualMerger<u32>>),
+    U64Equal(GenericStates<u64, ValueState<u64>, value::ExactlyEqualMerger<u64>>),
+    F32Equal(GenericStates<f32, ValueState<f32>, value::ExactlyEqualMerger<f32>>),
+    F64Equal(GenericStates<f64, ValueState<f64>, value::ExactlyEqualMerger<f64>>),
+    // Sum until threshold
+    I8SumThreshold(
+        GenericStates<i8, ValueState<i8>, value::SumUntilMerger<value::MaximumValueValidator<i8>>>,
+    ),
+    I16SumThreshold(
+        GenericStates<
+            i16,
+            ValueState<i16>,
+            value::SumUntilMerger<value::MaximumValueValidator<i16>>,
+        >,
+    ),
+    I32SumThreshold(
+        GenericStates<
+            i32,
+            ValueState<i32>,
+            value::SumUntilMerger<value::MaximumValueValidator<i32>>,
+        >,
+    ),
+    I64SumThreshold(
+        GenericStates<
+            i64,
+            ValueState<i64>,
+            value::SumUntilMerger<value::MaximumValueValidator<i64>>,
+        >,
+    ),
+    U8SumThreshold(
+        GenericStates<u8, ValueState<u8>, value::SumUntilMerger<value::MaximumValueValidator<u8>>>,
+    ),
+    U16SumThreshold(
+        GenericStates<
+            u16,
+            ValueState<u16>,
+            value::SumUntilMerger<value::MaximumValueValidator<u16>>,
+        >,
+    ),
+    U32SumThreshold(
+        GenericStates<
+            u32,
+            ValueState<u32>,
+            value::SumUntilMerger<value::MaximumValueValidator<u32>>,
+        >,
+    ),
+    U64SumThreshold(
+        GenericStates<
+            u64,
+            ValueState<u64>,
+            value::SumUntilMerger<value::MaximumValueValidator<u64>>,
+        >,
+    ),
+    F32SumThreshold(
+        GenericStates<
+            f32,
+            ValueState<f32>,
+            value::SumUntilMerger<value::MaximumValueValidator<f32>>,
+        >,
+    ),
+    F64SumThreshold(
+        GenericStates<
+            f64,
+            ValueState<f64>,
+            value::SumUntilMerger<value::MaximumValueValidator<f64>>,
+        >,
+    ),
+    // Sum until threshold with empty siblings
+    I8SumThresholdEmptySiblings(
+        GenericStates<
+            i8,
+            ValueState<i8>,
+            value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<i8>>,
+        >,
+    ),
+    I16SumThresholdEmptySiblings(
+        GenericStates<
+            i16,
+            ValueState<i16>,
+            value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<i16>>,
+        >,
+    ),
+    I32SumThresholdEmptySiblings(
+        GenericStates<
+            i32,
+            ValueState<i32>,
+            value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<i32>>,
+        >,
+    ),
+    I64SumThresholdEmptySiblings(
+        GenericStates<
+            i64,
+            ValueState<i64>,
+            value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<i64>>,
+        >,
+    ),
+    U8SumThresholdEmptySiblings(
+        GenericStates<
+            u8,
+            ValueState<u8>,
+            value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<u8>>,
+        >,
+    ),
+    U16SumThresholdEmptySiblings(
+        GenericStates<
+            u16,
+            ValueState<u16>,
+            value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<u16>>,
+        >,
+    ),
+    U32SumThresholdEmptySiblings(
+        GenericStates<
+            u32,
+            ValueState<u32>,
+            value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<u32>>,
+        >,
+    ),
+    U64SumThresholdEmptySiblings(
+        GenericStates<
+            u64,
+            ValueState<u64>,
+            value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<u64>>,
+        >,
+    ),
+    F32SumThresholdEmptySiblings(
+        GenericStates<
+            f32,
+            ValueState<f32>,
+            value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<f32>>,
+        >,
+    ),
+    F64SumThresholdEmptySiblings(
+        GenericStates<
+            f64,
+            ValueState<f64>,
+            value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<f64>>,
+        >,
+    ),
 }
 
 #[pymethods]
@@ -611,17 +753,15 @@ impl MomBuilder {
         &self,
         py: Python<'py>,
         subtree_index: usize,
-    ) -> PyResult<&'py PyArray1<usize>> {
+    ) -> PyResult<Bound<'py, PyArray1<usize>>> {
         if subtree_index >= self.py_builder_config.top_tree_config.max_norder_nleaves() {
-            return Err(PyValueError::new_err(
-                "subtree_index is out of range",
-            ));
+            return Err(PyValueError::new_err("subtree_index is out of range"));
         }
         let offset = self
             .py_builder_config
             .max_norder_index_offset(subtree_index);
 
-        let output = PyArray1::from_vec(
+        let output = PyArray1::from_vec_bound(
             py,
             (offset..offset + self.py_builder_config.subtree_config.max_norder_nleaves()).collect(),
         );
@@ -654,8 +794,8 @@ impl MomBuilder {
         &self,
         py: Python<'py>,
         subtree_index: usize,
-        a: &'py PyAny,
-    ) -> PyResult<Vec<(usize, &'py PyArray1<usize>, &'py PyUntypedArray)>> {
+        a: Bound<'py, PyAny>,
+    ) -> PyResult<OutputTree<'py>> {
         match &self.states {
             PyStates::MinMaxMean(PyMinMaxMeanStates::F32(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
@@ -663,37 +803,97 @@ impl MomBuilder {
             PyStates::MinMaxMean(PyMinMaxMeanStates::F64(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::Bool(generic)) => {
+            PyStates::Value(PyValueStates::BoolEqual(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::I8(generic)) => {
+            PyStates::Value(PyValueStates::I8Equal(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::I16(generic)) => {
+            PyStates::Value(PyValueStates::I16Equal(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::I32(generic)) => {
+            PyStates::Value(PyValueStates::I32Equal(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::I64(generic)) => {
+            PyStates::Value(PyValueStates::I64Equal(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::U8(generic)) => {
+            PyStates::Value(PyValueStates::U8Equal(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::U16(generic)) => {
+            PyStates::Value(PyValueStates::U16Equal(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::U32(generic)) => {
+            PyStates::Value(PyValueStates::U32Equal(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::U64(generic)) => {
+            PyStates::Value(PyValueStates::U64Equal(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::F32(generic)) => {
+            PyStates::Value(PyValueStates::F32Equal(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
-            PyStates::Value(PyValueStates::F64(generic)) => {
+            PyStates::Value(PyValueStates::F64Equal(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I8SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I16SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I32SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I64SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U8SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U16SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U32SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U64SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::F32SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::F64SumThreshold(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I8SumThresholdEmptySiblings(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I16SumThresholdEmptySiblings(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I32SumThresholdEmptySiblings(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I64SumThresholdEmptySiblings(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U8SumThresholdEmptySiblings(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U16SumThresholdEmptySiblings(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U32SumThresholdEmptySiblings(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U64SumThresholdEmptySiblings(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::F32SumThresholdEmptySiblings(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::F64SumThresholdEmptySiblings(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
         }
@@ -708,10 +908,7 @@ impl MomBuilder {
     /// list of (int, numpy.ndarray of uint64, numpy.ndarray of float32/64)
     ///     List of (norder, indexes, values) tuples, a tuple per non-empty
     ///     norder.
-    fn build_top_tree<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Vec<(usize, &'py PyArray1<usize>, &'py PyUntypedArray)>> {
+    fn build_top_tree<'py>(&self, py: Python<'py>) -> PyResult<OutputTree<'py>> {
         let top_tree_config = self.py_builder_config.top_tree_config.clone();
         match &self.states {
             PyStates::MinMaxMean(PyMinMaxMeanStates::F32(generic)) => {
@@ -720,37 +917,97 @@ impl MomBuilder {
             PyStates::MinMaxMean(PyMinMaxMeanStates::F64(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::Bool(generic)) => {
+            PyStates::Value(PyValueStates::BoolEqual(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::I8(generic)) => {
+            PyStates::Value(PyValueStates::I8Equal(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::I16(generic)) => {
+            PyStates::Value(PyValueStates::I16Equal(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::I32(generic)) => {
+            PyStates::Value(PyValueStates::I32Equal(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::I64(generic)) => {
+            PyStates::Value(PyValueStates::I64Equal(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::U8(generic)) => {
+            PyStates::Value(PyValueStates::U8Equal(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::U16(generic)) => {
+            PyStates::Value(PyValueStates::U16Equal(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::U32(generic)) => {
+            PyStates::Value(PyValueStates::U32Equal(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::U64(generic)) => {
+            PyStates::Value(PyValueStates::U64Equal(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::F32(generic)) => {
+            PyStates::Value(PyValueStates::F32Equal(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
-            PyStates::Value(PyValueStates::F64(generic)) => {
+            PyStates::Value(PyValueStates::F64Equal(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I8SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I16SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I32SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I64SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U8SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U16SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U32SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U64SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::F32SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::F64SumThreshold(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I8SumThresholdEmptySiblings(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I16SumThresholdEmptySiblings(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I32SumThresholdEmptySiblings(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I64SumThresholdEmptySiblings(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U8SumThresholdEmptySiblings(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U16SumThresholdEmptySiblings(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U32SumThresholdEmptySiblings(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U64SumThresholdEmptySiblings(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::F32SumThresholdEmptySiblings(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::F64SumThresholdEmptySiblings(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
         }
@@ -790,48 +1047,48 @@ impl MomBuilder {
                  PyStates::MinMaxMean(PyMinMaxMeanStates::F64(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::Bool(self_generic)),
-                 PyStates::Value(PyValueStates::Bool(other_generic))) => {
+                (PyStates::Value(PyValueStates::BoolEqual(self_generic)),
+                 PyStates::Value(PyValueStates::BoolEqual(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::I8(self_generic)),
-                 PyStates::Value(PyValueStates::I8(other_generic))) => {
+                (PyStates::Value(PyValueStates::I8Equal(self_generic)),
+                 PyStates::Value(PyValueStates::I8Equal(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::I16(self_generic)),
-                 PyStates::Value(PyValueStates::I16(other_generic))) => {
+                (PyStates::Value(PyValueStates::I16Equal(self_generic)),
+                 PyStates::Value(PyValueStates::I16Equal(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::I32(self_generic)),
-                 PyStates::Value(PyValueStates::I32(other_generic))) => {
+                (PyStates::Value(PyValueStates::I32Equal(self_generic)),
+                 PyStates::Value(PyValueStates::I32Equal(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::I64(self_generic)),
-                 PyStates::Value(PyValueStates::I64(other_generic))) => {
+                (PyStates::Value(PyValueStates::I64Equal(self_generic)),
+                 PyStates::Value(PyValueStates::I64Equal(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::U8(self_generic)),
-                 PyStates::Value(PyValueStates::U8(other_generic))) => {
+                (PyStates::Value(PyValueStates::U8Equal(self_generic)),
+                 PyStates::Value(PyValueStates::U8Equal(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::U16(self_generic)),
-                 PyStates::Value(PyValueStates::U16(other_generic))) => {
+                (PyStates::Value(PyValueStates::U16Equal(self_generic)),
+                 PyStates::Value(PyValueStates::U16Equal(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::U32(self_generic)),
-                 PyStates::Value(PyValueStates::U32(other_generic))) => {
+                (PyStates::Value(PyValueStates::U32Equal(self_generic)),
+                 PyStates::Value(PyValueStates::U32Equal(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::U64(self_generic)),
-                 PyStates::Value(PyValueStates::U64(other_generic))) => {
+                (PyStates::Value(PyValueStates::U64Equal(self_generic)),
+                 PyStates::Value(PyValueStates::U64Equal(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::F32(self_generic)),
-                 PyStates::Value(PyValueStates::F32(other_generic))) => {
+                (PyStates::Value(PyValueStates::F32Equal(self_generic)),
+                 PyStates::Value(PyValueStates::F32Equal(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
-                (PyStates::Value(PyValueStates::F64(self_generic)),
-                 PyStates::Value(PyValueStates::F64(other_generic))) => {
+                (PyStates::Value(PyValueStates::F64Equal(self_generic)),
+                 PyStates::Value(PyValueStates::F64Equal(other_generic))) => {
                     self_generic.extend(other_generic)
                 }
                 _ => {
@@ -856,13 +1113,13 @@ impl MomBuilder {
         (args, kwargs.into_iter().collect())
     }
 
-    fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<&'py PyBytes> {
+    fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let vec_bytes = serde_pickle::to_vec(&self, serde_pickle::SerOptions::new())
             .map_err(|err| PicklingError::new_err(format!("Cannot pickle MOMBuilder: {}", err)))?;
-        Ok(PyBytes::new(py, &vec_bytes))
+        Ok(PyBytes::new_bound(py, &vec_bytes))
     }
 
-    fn __setstate__(&mut self, state: &PyBytes) -> PyResult<()> {
+    fn __setstate__<'py>(&mut self, state: Bound<'py, PyBytes>) -> PyResult<()> {
         *self = serde_pickle::from_slice(state.as_bytes(), serde_pickle::DeOptions::new())
             .map_err(|err| {
                 UnpicklingError::new_err(format!("Cannot unpickle MOMBuilder: {}", err))
@@ -876,7 +1133,7 @@ impl MomBuilder {
         self.clone()
     }
 
-    fn __deepcopy__(&self, _memo: Py<PyAny>) -> Self {
+    fn __deepcopy__(&self, _memo: Bound<PyAny>) -> Self {
         self.clone()
     }
 }
@@ -891,9 +1148,9 @@ where
         &self,
         py: Python<'py>,
         subtree_index: usize,
-        a: &'py PyArray1<T>,
+        a: &Bound<'py, PyArray1<T>>,
         config: &PyBuilderConfig,
-    ) -> PyResult<Vec<(usize, &'py PyArray1<usize>, &'py PyUntypedArray)>> {
+    ) -> PyResult<OutputTree<'py>> {
         py.allow_threads(|| {
             if self
                 .states
@@ -966,7 +1223,7 @@ where
         &self,
         py: Python<'py>,
         top_tree_config: TreeConfig,
-    ) -> PyResult<Vec<(usize, &'py PyArray1<usize>, &'py PyUntypedArray)>> {
+    ) -> PyResult<OutputTree<'py>> {
         let tree = py.allow_threads(|| {
             {
                 let states = self
@@ -1009,7 +1266,7 @@ where
         py: Python<'py>,
         tree: Tree<State>,
         norder_offset: usize,
-    ) -> Vec<(usize, &'py PyArray1<usize>, &'py PyUntypedArray)> {
+    ) -> OutputTree<'py> {
         tree.into_iter()
             .enumerate()
             .filter(|(_norder, tiles)| tiles.len() != 0)
@@ -1017,9 +1274,10 @@ where
                 let (indexes, values) = tiles.into_tuple();
                 (
                     norder + norder_offset,
-                    PyArray1::from_vec(py, indexes),
-                    PyArray1::from_iter(py, values.into_iter().map(|state| state.into()))
-                        .as_untyped(),
+                    PyArray1::from_vec_bound(py, indexes),
+                    PyArray1::from_iter_bound(py, values.into_iter().map(|state| state.into()))
+                        .as_untyped()
+                        .to_owned(),
                 )
             })
             .collect()
@@ -1064,9 +1322,7 @@ where
 }
 
 #[pymodule]
-fn mom_builder(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(py_mom_from_array, m)?)?;
-    m.add_function(wrap_pyfunction!(py_mom_from_batch_it, m)?)?;
+fn mom_builder(m: Bound<PyModule>) -> PyResult<()> {
     m.add_class::<MomMerger>()?;
     m.add_class::<MomBuilder>()?;
     Ok(())
