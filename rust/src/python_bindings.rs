@@ -122,10 +122,12 @@ impl MomMerger {
                         'h' => PyStates::Value(PyValueStates::I16Equal(GenericStates::default())),
                         'i' => PyStates::Value(PyValueStates::I32Equal(GenericStates::default())),
                         'q' => PyStates::Value(PyValueStates::I64Equal(GenericStates::default())),
+                        'l' => PyStates::Value(PyValueStates::I64Equal(GenericStates::default())),
                         'B' => PyStates::Value(PyValueStates::U8Equal(GenericStates::default())),
                         'H' => PyStates::Value(PyValueStates::U16Equal(GenericStates::default())),
                         'I' => PyStates::Value(PyValueStates::U32Equal(GenericStates::default())),
                         'Q' => PyStates::Value(PyValueStates::U64Equal(GenericStates::default())),
+                        'L' => PyStates::Value(PyValueStates::I64Equal(GenericStates::default())),
                         'f' => PyStates::Value(PyValueStates::F32Equal(GenericStates::default())),
                         'd' => PyStates::Value(PyValueStates::F64Equal(GenericStates::default())),
                         _ => {
