@@ -9,6 +9,7 @@ name = "mom_builder"
 crate-type = ["cdylib"]
 
 [dependencies]
+conv = "0.3.3"
 itertools = "0.13"
 num-traits = "0.2.19"
 numpy = "0.21"

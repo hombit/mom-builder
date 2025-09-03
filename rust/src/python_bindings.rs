@@ -40,10 +40,33 @@ type OutputTree<'py> = Vec<(
 ///     - For "min-max-mean" state:
 ///       - "rtol" - merger would check the relative difference between
 ///         minimum and maximum values, and merge the states if it is less than
-///         the threshold. The threshold is specified with "threshold" kwarg.
+///         the threshold. The threshold is specified with the "threshold"
+///         kwarg.
 ///     - For "value" state:
 ///       - "equal" - merger would merge the states if all values are exactly
 ///         equal.
+///       - "sum-threshold" - merger would sum the values while the total value
+///         exceeds the given threshold. The threshold is specified with
+///         the "threshold" kwarg.
+///       - "sum-threshold-empty-siblings" - same as "sum-threshold", but it
+///         also checks if number of empty (zero-valued) values is less or
+///         equal to a given value "max_empty_siblings". You can still allow
+///         a merge for the case when all the values are empty with the
+///         "allow_empty_merge" kwarg.
+///       - "sum-poisson-chi2" - merger would sum values if all children values
+///         (counts) are drawn from the same Poisson distribution. This test is
+///         using a naive χ² test: ∑ (x - mean)² / mean ≤ threshold.
+///         Input values are assumed to be non-negative.
+///         The threshold is specified with the "threshold" kwarg.
+///         PPF values for three degrees of freedom (four values minus one
+///         parameter) (from scipy.stats.chi2(df=3).ppf/.cdf):
+///         χ²(dof=3) | p-value
+///         10.000    | 0.9814
+///         11.345    | 0.9900
+///         12.838    | 0.9950
+///         16.266    | 0.9990
+///         20.000    | 0.9998
+///
 /// dtype : numpy.dtype
 ///     Data type of the input arrays.
 /// **kwargs : dict
@@ -121,13 +144,15 @@ impl MomMerger {
                         'b' => PyStates::Value(PyValueStates::I8Equal(GenericStates::default())),
                         'h' => PyStates::Value(PyValueStates::I16Equal(GenericStates::default())),
                         'i' => PyStates::Value(PyValueStates::I32Equal(GenericStates::default())),
-                        'q' => PyStates::Value(PyValueStates::I64Equal(GenericStates::default())),
-                        'l' => PyStates::Value(PyValueStates::I64Equal(GenericStates::default())),
+                        'q' | 'l' => {
+                            PyStates::Value(PyValueStates::I64Equal(GenericStates::default()))
+                        }
                         'B' => PyStates::Value(PyValueStates::U8Equal(GenericStates::default())),
                         'H' => PyStates::Value(PyValueStates::U16Equal(GenericStates::default())),
                         'I' => PyStates::Value(PyValueStates::U32Equal(GenericStates::default())),
-                        'Q' => PyStates::Value(PyValueStates::U64Equal(GenericStates::default())),
-                        'L' => PyStates::Value(PyValueStates::I64Equal(GenericStates::default())),
+                        'Q' | 'L' => {
+                            PyStates::Value(PyValueStates::U64Equal(GenericStates::default()))
+                        }
                         'f' => PyStates::Value(PyValueStates::F32Equal(GenericStates::default())),
                         'd' => PyStates::Value(PyValueStates::F64Equal(GenericStates::default())),
                         _ => {
@@ -163,11 +188,11 @@ impl MomMerger {
                                 threshold.extract()?,
                             )),
                         ))),
-                        'q' => PyStates::Value(PyValueStates::I64SumThreshold(GenericStates::new(
-                            value::SumUntilMerger::new(value::MaximumValueValidator(
-                                threshold.extract()?,
+                        'q' | 'l' => PyStates::Value(PyValueStates::I64SumThreshold(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueValidator(threshold.extract()?),
                             )),
-                        ))),
+                        )),
                         'B' => PyStates::Value(PyValueStates::U8SumThreshold(GenericStates::new(
                             value::SumUntilMerger::new(value::MaximumValueValidator(
                                 threshold.extract()?,
@@ -183,11 +208,11 @@ impl MomMerger {
                                 threshold.extract()?,
                             )),
                         ))),
-                        'Q' => PyStates::Value(PyValueStates::U64SumThreshold(GenericStates::new(
-                            value::SumUntilMerger::new(value::MaximumValueValidator(
-                                threshold.extract()?,
+                        'Q' | 'L' => PyStates::Value(PyValueStates::U64SumThreshold(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::MaximumValueValidator(threshold.extract()?),
                             )),
-                        ))),
+                        )),
                         'f' => PyStates::Value(PyValueStates::F32SumThreshold(GenericStates::new(
                             value::SumUntilMerger::new(value::MaximumValueValidator(
                                 threshold.extract()?,
@@ -208,7 +233,7 @@ impl MomMerger {
                 "sum-threshold-empty-siblings" => {
                     if kwargs.keys().len() != 3 {
                         return Err(PyValueError::new_err(
-                            "state='value' and merger='sum-threshold-empty-siblings' require exactly one additional keyword argument: threshold",
+                            "state='value' and merger='sum-threshold-empty-siblings' require exactly three additional keyword argument: threshold, max_empty_siblings, and allow_empty_merge",
                         ));
                     }
                     let threshold = kwargs
@@ -245,7 +270,7 @@ impl MomMerger {
                                 },
                             )),
                         )),
-                        'q' => PyStates::Value(PyValueStates::I64SumThresholdEmptySiblings(
+                        'q' | 'l' => PyStates::Value(PyValueStates::I64SumThresholdEmptySiblings(
                             GenericStates::new(value::SumUntilMerger::new(
                                 value::MaximumValueEmptySiblingValidator {
                                     threshold: threshold.extract()?,
@@ -281,7 +306,7 @@ impl MomMerger {
                                 },
                             )),
                         )),
-                        'Q' => PyStates::Value(PyValueStates::U64SumThresholdEmptySiblings(
+                        'Q' | 'L' => PyStates::Value(PyValueStates::U64SumThresholdEmptySiblings(
                             GenericStates::new(value::SumUntilMerger::new(
                                 value::MaximumValueEmptySiblingValidator {
                                     threshold: threshold.extract()?,
@@ -311,6 +336,74 @@ impl MomMerger {
                         _ => {
                             return Err(PyValueError::new_err(
                                 r#"Only integer and floating point dtypes are supported for state="value" and merger="sum-threshold-empty-siblings""#,
+                            ))
+                        }
+                    }
+                }
+                "sum-poisson-chi2" => {
+                    if kwargs.keys().len() != 1 {
+                        return Err(PyValueError::new_err(
+                            "state='value' and merger='sum-poisson-chi2' require exactly one additional keyword argument: threshold",
+                        ));
+                    }
+                    let threshold = kwargs
+                        .get("threshold")
+                        .ok_or_else(|| PyValueError::new_err(r#"threshold keyword argument is required for state="value" and merger="sum-poisson-chi2""#))?;
+
+                    match dtype_char {
+                        'b' => PyStates::Value(PyValueStates::I8SumPoissonChi2(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::PoissonChi2Validator::new(threshold.extract()?),
+                            )),
+                        )),
+                        'h' => PyStates::Value(PyValueStates::I16SumPoissonChi2(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::PoissonChi2Validator::new(threshold.extract()?),
+                            )),
+                        )),
+                        'i' => PyStates::Value(PyValueStates::I32SumPoissonChi2(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::PoissonChi2Validator::new(threshold.extract()?),
+                            )),
+                        )),
+                        'q' | 'l' => PyStates::Value(PyValueStates::I64SumPoissonChi2(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::PoissonChi2Validator::new(threshold.extract()?),
+                            )),
+                        )),
+                        'B' => PyStates::Value(PyValueStates::U8SumPoissonChi2(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::PoissonChi2Validator::new(threshold.extract()?),
+                            )),
+                        )),
+                        'H' => PyStates::Value(PyValueStates::U16SumPoissonChi2(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::PoissonChi2Validator::new(threshold.extract()?),
+                            )),
+                        )),
+                        'I' => PyStates::Value(PyValueStates::U32SumPoissonChi2(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::PoissonChi2Validator::new(threshold.extract()?),
+                            )),
+                        )),
+                        'Q' | 'L' => PyStates::Value(PyValueStates::U64SumPoissonChi2(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::PoissonChi2Validator::new(threshold.extract()?),
+                            )),
+                        )),
+                        'f' => PyStates::Value(PyValueStates::F32SumPoissonChi2(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::PoissonChi2Validator::new(threshold.extract()?),
+                            )),
+                        )),
+                        'd' => PyStates::Value(PyValueStates::F64SumPoissonChi2(
+                            GenericStates::new(value::SumUntilMerger::new(
+                                value::PoissonChi2Validator::new(threshold.extract()?),
+                            )),
+                        )),
+                        _ => {
+                            return Err(PyValueError::new_err(
+                                r#"Only integer and floating point dtypes are supported for state="value" and merger=""sum-poisson-chi2""#,
                             ))
                         }
                     }
@@ -683,6 +776,69 @@ enum PyValueStates {
             value::SumUntilMerger<value::MaximumValueEmptySiblingValidator<f64>>,
         >,
     ),
+    // Sum if Poisson Chi2 test passes
+    I8SumPoissonChi2(
+        GenericStates<i8, ValueState<i8>, value::SumUntilMerger<value::PoissonChi2Validator<i8>>>,
+    ),
+    I16SumPoissonChi2(
+        GenericStates<
+            i16,
+            ValueState<i16>,
+            value::SumUntilMerger<value::PoissonChi2Validator<i16>>,
+        >,
+    ),
+    I32SumPoissonChi2(
+        GenericStates<
+            i32,
+            ValueState<i32>,
+            value::SumUntilMerger<value::PoissonChi2Validator<i32>>,
+        >,
+    ),
+    I64SumPoissonChi2(
+        GenericStates<
+            i64,
+            ValueState<i64>,
+            value::SumUntilMerger<value::PoissonChi2Validator<i64>>,
+        >,
+    ),
+    U8SumPoissonChi2(
+        GenericStates<u8, ValueState<u8>, value::SumUntilMerger<value::PoissonChi2Validator<u8>>>,
+    ),
+    U16SumPoissonChi2(
+        GenericStates<
+            u16,
+            ValueState<u16>,
+            value::SumUntilMerger<value::PoissonChi2Validator<u16>>,
+        >,
+    ),
+    U32SumPoissonChi2(
+        GenericStates<
+            u32,
+            ValueState<u32>,
+            value::SumUntilMerger<value::PoissonChi2Validator<u32>>,
+        >,
+    ),
+    U64SumPoissonChi2(
+        GenericStates<
+            u64,
+            ValueState<u64>,
+            value::SumUntilMerger<value::PoissonChi2Validator<u64>>,
+        >,
+    ),
+    F32SumPoissonChi2(
+        GenericStates<
+            f32,
+            ValueState<f32>,
+            value::SumUntilMerger<value::PoissonChi2Validator<f32>>,
+        >,
+    ),
+    F64SumPoissonChi2(
+        GenericStates<
+            f64,
+            ValueState<f64>,
+            value::SumUntilMerger<value::PoissonChi2Validator<f64>>,
+        >,
+    ),
 }
 
 #[pymethods]
@@ -898,6 +1054,36 @@ impl MomBuilder {
             PyStates::Value(PyValueStates::F64SumThresholdEmptySiblings(generic)) => {
                 generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
             }
+            PyStates::Value(PyValueStates::I8SumPoissonChi2(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I16SumPoissonChi2(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I32SumPoissonChi2(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::I64SumPoissonChi2(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U8SumPoissonChi2(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U16SumPoissonChi2(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U32SumPoissonChi2(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::U64SumPoissonChi2(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::F32SumPoissonChi2(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
+            PyStates::Value(PyValueStates::F64SumPoissonChi2(generic)) => {
+                generic.build_subtree(py, subtree_index, a.downcast()?, &self.py_builder_config)
+            }
         }
     }
 
@@ -1010,6 +1196,36 @@ impl MomBuilder {
                 generic.build_top_tree(py, top_tree_config)
             }
             PyStates::Value(PyValueStates::F64SumThresholdEmptySiblings(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I8SumPoissonChi2(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I16SumPoissonChi2(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I32SumPoissonChi2(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::I64SumPoissonChi2(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U8SumPoissonChi2(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U16SumPoissonChi2(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U32SumPoissonChi2(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::U64SumPoissonChi2(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::F32SumPoissonChi2(generic)) => {
+                generic.build_top_tree(py, top_tree_config)
+            }
+            PyStates::Value(PyValueStates::F64SumPoissonChi2(generic)) => {
                 generic.build_top_tree(py, top_tree_config)
             }
         }

@@ -1,6 +1,7 @@
 use crate::state::merge_is_valid::MergeIsValid;
 use crate::state::merge_states::MergeStates;
 use crate::state::value::ValueState;
+use conv::{ConvUtil, ValueInto};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 
@@ -107,5 +108,44 @@ where
         }
 
         bellow_threshold
+    }
+}
+
+/// Validator that checks whether child counts come from the same Poisson distribution using
+/// a naive Chi-squared test. The only field is the maximum (threshold) Chi-squared value
+/// for a merge to be considered valid. We assume that all values are non-negative.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct PoissonChi2Validator<T> {
+    pub max_chi2: f64,
+    phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> PoissonChi2Validator<T> {
+    pub fn new(max_chi2: f64) -> Self {
+        Self {
+            max_chi2,
+            phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T> MergeIsValid for PoissonChi2Validator<T>
+where
+    T: Copy + ValueInto<f64>,
+{
+    type State = ValueState<T>;
+
+    /// Checks if the merged state is valid, i.e. less than or equal to the maximum value.
+    fn merge_is_valid(&self, original_states: &[Self::State], merged_state: &Self::State) -> bool {
+        let sum = merged_state.0.value_as::<f64>().unwrap();
+        if sum.is_zero() {
+            return true;
+        }
+        let mean = sum / original_states.len() as f64;
+        let chi2 = original_states
+            .iter()
+            .map(|state| (state.0.value_as::<f64>().unwrap() - mean).powi(2) / mean)
+            .sum::<f64>();
+        chi2 <= self.max_chi2
     }
 }
