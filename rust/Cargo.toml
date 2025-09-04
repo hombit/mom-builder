@@ -10,14 +10,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 conv = "0.3.3"
-itertools = "0.13"
+itertools = "0.14"
 num-traits = "0.2.19"
 numpy = "0.21"
 pyo3 = { version = "0.21", features = ["extension-module"] }
 serde = { version = "1", features = ["derive", "rc"] }
 # We may use any serialization format, but pickle makes it easy to introspect with Python
 serde-pickle = "1"
-thiserror = "1.0.50"
-
-[dev-dependencies]
-approx = "0.5.1"
+thiserror = "2"
