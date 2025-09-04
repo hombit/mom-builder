@@ -39,8 +39,9 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
-          path: dist
+          name: artifact_linux_${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
 
   windows:
     runs-on: windows-latest
@@ -62,8 +63,9 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
-          path: dist
+          name: artifact_windows_${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
 
   macos:
     runs-on: macos-latest
@@ -84,8 +86,9 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
-          path: dist
+          name: artifact_macos_${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
 
   sdist:
     runs-on: ubuntu-latest
@@ -99,8 +102,9 @@ jobs:
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
-          path: dist
+          name: artifact_source
+          path: dist/*.tar.gz
+          if-no-files-found: error
 
   release:
     name: Release
@@ -110,11 +114,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v5
         with:
-          name: wheels
+          pattern: artifact_*
+          merge-multiple: true
+          path: artifact
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         with:
           command: upload
-          args: --skip-existing *
+          args: --skip-existing artifact/*.whl artifact/*.tar.gz
